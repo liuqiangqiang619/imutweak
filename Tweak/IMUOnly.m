@@ -342,6 +342,100 @@ static CMAcceleration tl_gravity(id self, SEL _cmd) {
     return (CMAcceleration){ gx, gy, gz };
 }
 
+// ------------------------------------------------------------------ attitude
+// 抖音若交叉验证 rotationRate 与 attitude，只伪一个会矛盾：这里把 attitude 的
+// yaw/pitch/roll/quaternion/rotationMatrix 也接到同一套积分上（真实 CMAttitude 对象保留，
+// 只换 getter，避免 [[CMAttitude alloc] init] 出来的 _internal 为 nil 导致崩溃）。
+static double (*orig_att_yaw)(id, SEL) = NULL;
+static double (*orig_att_pitch)(id, SEL) = NULL;
+static double (*orig_att_roll)(id, SEL) = NULL;
+static CMQuaternion (*orig_att_quat)(id, SEL) = NULL;
+static CMRotationMatrix (*orig_att_mat)(id, SEL) = NULL;
+
+static BOOL TLFresh(void) {
+    return g_haveData && g_lastRxTime > 0 && (CACurrentMediaTime() - g_lastRxTime <= 0.5);
+}
+
+// 让积分跟上当前时刻（attitude 可能比 rotationRate 读得更勤或更懒）
+static void TLAdvance(double t) {
+    if (!TLFresh()) { g_iLast = 0; return; }
+    float g[3] = {0, 0, 0};
+    SampleAt(t - g_delayComp, g);
+    TLIntegrate(t, g);
+    // 无磁力计：yaw 会漂，按 0.5 秒时间常数往 0 拉一点点，避免整场直播漂到看不见的方向
+    g_iYaw += (-g_iYaw) * 0.0008;
+    g_iRoll += (-g_iRoll) * 0.0004;
+}
+
+static double TLNormPi(double a) {
+    while (a > M_PI) a -= 2 * M_PI;
+    while (a < -M_PI) a += 2 * M_PI;
+    return a;
+}
+
+static double tl_att_yaw(id self, SEL _cmd) {
+    if (!TLFresh()) return orig_att_yaw ? orig_att_yaw(self, _cmd) : 0.0;
+    TLAdvance(CACurrentMediaTime());
+    return TLNormPi(g_iYaw);
+}
+static double tl_att_pitch(id self, SEL _cmd) {
+    if (!TLFresh()) return orig_att_pitch ? orig_att_pitch(self, _cmd) : 0.0;
+    TLAdvance(CACurrentMediaTime());
+    return TLNormPi(g_iPitch);
+}
+static double tl_att_roll(id self, SEL _cmd) {
+    if (!TLFresh()) return orig_att_roll ? orig_att_roll(self, _cmd) : 0.0;
+    TLAdvance(CACurrentMediaTime());
+    return TLNormPi(g_iRoll);
+}
+
+// R = Rz(yaw) * Rx(pitch) * Ry(roll)，与 yaw/pitch/roll 三个 getter 自洽
+static void TLRotation(double yaw, double pitch, double roll, double m[9]) {
+    double cy = cos(yaw), sy = sin(yaw);
+    double cp = cos(pitch), sp = sin(pitch);
+    double cr = cos(roll), sr = sin(roll);
+    m[0] = cy * cr + sy * sp * sr;
+    m[1] = sy * cp;
+    m[2] = -cy * sr + sy * sp * cr;
+    m[3] = -sy * cr + cy * sp * sr;
+    m[4] = cy * cp;
+    m[5] = sy * sr + cy * sp * cr;
+    m[6] = cp * sr;
+    m[7] = -sp;
+    m[8] = cp * cr;
+}
+
+static CMQuaternion tl_att_quat(id self, SEL _cmd) {
+    if (!TLFresh()) return orig_att_quat ? orig_att_quat(self, _cmd) : (CMQuaternion){0, 0, 0, 1};
+    TLAdvance(CACurrentMediaTime());
+    double m[9];
+    TLRotation(TLNormPi(g_iYaw), TLNormPi(g_iPitch), TLNormPi(g_iRoll), m);
+    double tr = m[0] + m[4] + m[8];
+    double x, y, z, w;
+    if (tr > 0) {
+        double S = sqrt(tr + 1.0) * 2.0;
+        w = 0.25 * S; x = (m[5] - m[7]) / S; y = (m[6] - m[2]) / S; z = (m[1] - m[3]) / S;
+    } else if (m[0] > m[4] && m[0] > m[8]) {
+        double S = sqrt(1.0 + m[0] - m[4] - m[8]) * 2.0;
+        w = (m[5] - m[7]) / S; x = 0.25 * S; y = (m[3] + m[1]) / S; z = (m[6] + m[2]) / S;
+    } else if (m[4] > m[8]) {
+        double S = sqrt(1.0 + m[4] - m[0] - m[8]) * 2.0;
+        w = (m[6] - m[2]) / S; x = (m[3] + m[1]) / S; y = 0.25 * S; z = (m[7] + m[5]) / S;
+    } else {
+        double S = sqrt(1.0 + m[8] - m[0] - m[4]) * 2.0;
+        w = (m[1] - m[3]) / S; x = (m[6] + m[2]) / S; y = (m[7] + m[5]) / S; z = 0.25 * S;
+    }
+    return (CMQuaternion){x, y, z, w};
+}
+
+static CMRotationMatrix tl_att_mat(id self, SEL _cmd) {
+    if (!TLFresh()) return orig_att_mat ? orig_att_mat(self, _cmd) : (CMRotationMatrix){1, 0, 0, 0, 1, 0, 0, 0, 1};
+    TLAdvance(CACurrentMediaTime());
+    double m[9];
+    TLRotation(TLNormPi(g_iYaw), TLNormPi(g_iPitch), TLNormPi(g_iRoll), m);
+    return (CMRotationMatrix){ m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8] };
+}
+
 // 只用来周期性打点，不参与数据通路
 static void TickLog(void) {
     if (!g_haveData) return;
@@ -406,7 +500,22 @@ static void TLInstallHooks(void) {
             if (mt) { orig_timestamp = (void*)method_getImplementation(mt); method_setImplementation(mt, (IMP)tl_timestamp); }
             Method mg = class_getInstanceMethod(dm, @selector(gravity));
             if (mg) { orig_gravity = (void*)method_getImplementation(mg); method_setImplementation(mg, (IMP)tl_gravity); }
-            TL_LOG(@"motion getters hooked (rate=%d ts=%d grav=%d)", orig_rotationRate != NULL, orig_timestamp != NULL, orig_gravity != NULL);
+            // CMAttitude：真实对象保留，只把 5 个 getter 接到同一套积分（attitude 与 rotationRate 自洽）
+            Class at = NSClassFromString(@"CMAttitude");
+            if (at) {
+                Method a1 = class_getInstanceMethod(at, @selector(yaw));
+                if (a1) { orig_att_yaw = (void*)method_getImplementation(a1); method_setImplementation(a1, (IMP)tl_att_yaw); }
+                Method a2 = class_getInstanceMethod(at, @selector(pitch));
+                if (a2) { orig_att_pitch = (void*)method_getImplementation(a2); method_setImplementation(a2, (IMP)tl_att_pitch); }
+                Method a3 = class_getInstanceMethod(at, @selector(roll));
+                if (a3) { orig_att_roll = (void*)method_getImplementation(a3); method_setImplementation(a3, (IMP)tl_att_roll); }
+                Method a4 = class_getInstanceMethod(at, @selector(quaternion));
+                if (a4) { orig_att_quat = (void*)method_getImplementation(a4); method_setImplementation(a4, (IMP)tl_att_quat); }
+                Method a5 = class_getInstanceMethod(at, @selector(rotationMatrix));
+                if (a5) { orig_att_mat = (void*)method_getImplementation(a5); method_setImplementation(a5, (IMP)tl_att_mat); }
+            }
+            TL_LOG(@"motion getters hooked (rate=%d ts=%d grav=%d att=%d)", orig_rotationRate != NULL, orig_timestamp != NULL, orig_gravity != NULL,
+                   orig_att_yaw != NULL);
         }
 
         g_logTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer* t){ TickLog(); }];

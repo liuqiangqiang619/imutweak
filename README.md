@@ -82,3 +82,28 @@ python imu-sender.py --usbmux --mode tianle
 ```
 
 实测：`imu listen on 9803` → sender 转发 → 手机端约 **96.7Hz**（100Hz 标称，受调度抖动影响）。
+
+## 符号约定（与天乐 tl_push 的 9803 端口一致）
+
+`rotationRate` 用的是 iOS 右手系：x 向右、y 向上、z 朝用户。
+
+| 画面内容 | 物理含义 | 期望输出 |
+|---|---|---|
+| 白块向右移动 | 相机向左转（yaw 左） | `wy` 为正（≈ +2.0） |
+| 白块向左移动 | 相机向右转 | `wy` 为负 |
+| 白块向上移动 | 相机向下俯（pitch 下） | `wx` 为负（≈ -0.9） |
+| 白块向下移动 | 相机向上仰 | `wx` 为正 |
+
+自检素材：`D:\TianLePlayer\build\move_h.mp4`（白块右移）、`move_v.mp4`（白块上移）。
+播放后看 `imu-log`：`move_h` 应出现 `wy≈+2`，`move_v` 应出现 `wx≈-0.9`。
+`wz` 恒有 ±0.01 rad/s 量级的零漂 + 白噪（真陀螺静止时也不为零），不是故障。
+
+## 数据流
+
+```
+tl_push.exe (PC, 9803)  --12B头+5样本-->  imu-sender.py  --USB/ Wi-Fi-->  IMUOnly.dylib (手机, 9802)
+```
+
+- 天乐侧 `ImuServInit()` 用 `timeBeginPeriod(1)` 保证 100Hz；`TL_IMU=0` 可关闭。
+- `TL_IMU_FLIP=0` 可关掉 yaw 取反（回到旧行为做对比）。
+- USB 被 usbmuxd 拒绝（`连接端口 9802 失败 Number=3`）时，sender 自动降级到 Wi-Fi 直连。
