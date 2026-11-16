@@ -28,6 +28,19 @@
 #import <math.h>
 #import <pthread.h>
 #import <sys/socket.h>
+#import <string.h>
+#import <stdio.h>
+#import <unistd.h>
+#import <stdlib.h>
+
+static void TLLogWrite(const char* line);
+
+#define TL_LOG(fmt, ...) do { \
+    NSString* _m = [NSString stringWithFormat:(fmt), ##__VA_ARGS__]; \
+    NSLog(@"[TLIMU] %@", _m); \
+    TLLogWrite(_m.UTF8String); \
+} while (0)
+
 #import <netinet/in.h>
 #import <netinet/tcp.h>
 #import <arpa/inet.h>
@@ -106,11 +119,6 @@ static void TLLogInit(void) {
     }
 }
 
-#define TL_LOG(fmt, ...) do { \
-    NSString* _m = [NSString stringWithFormat:(fmt), ##__VA_ARGS__]; \
-    TL_LOG(@"%@", _m); \
-    TLLogWrite(_m.UTF8String); \
-} while (0)
 
 // ------------------------------------------------------------------ 工具
 static BOOL SetNum(id obj, NSArray<NSString*>* keys, double v) {
