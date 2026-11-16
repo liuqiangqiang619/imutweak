@@ -443,8 +443,9 @@ static void TickLog(void) {
     double now = CACurrentMediaTime();
     float g[3] = {0, 0, 0};
     SampleAt(now - g_delayComp, g);
-    TL_LOG(@"wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms", g[0], g[1], g[2],
-           g_rxSamples, g_lastRxTime > 0 ? (now - g_lastRxTime) * 1000.0 : -1);
+    TL_LOG(@"wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms stale=%d", g[0], g[1], g[2],
+           g_rxSamples, g_lastRxTime > 0 ? (now - g_lastRxTime) * 1000.0 : -1,
+           (g_lastRxTime > 0 && (now - g_lastRxTime) <= 0.5) ? 0 : 1);
 }
 
 // ------------------------------------------------------------------ hook
