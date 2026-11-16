@@ -313,7 +313,10 @@ static void TLIntegrate(double t, const float g[3]) {
 }
 
 static CMRotationRate tl_rotationRate(id self, SEL _cmd) {
-    if (!g_haveData) return orig_rotationRate ? orig_rotationRate(self, _cmd) : (CMRotationRate){0, 0, 0};
+    // 超过 500ms 没有新样本就退回真实传感器：手机静止时读数为 0，
+    // 比冻结在最后一个值更像真机（冻结值 = 明显破绽）
+    BOOL stale = (g_lastRxTime <= 0) || (CACurrentMediaTime() - g_lastRxTime > 0.5);
+    if (!g_haveData || stale) return orig_rotationRate ? orig_rotationRate(self, _cmd) : (CMRotationRate){0, 0, 0};
     double t = CACurrentMediaTime();
     float g[3] = {0, 0, 0};
     SampleAt(t - g_delayComp, g);
@@ -331,7 +334,8 @@ static NSTimeInterval tl_timestamp(id self, SEL _cmd) {
 }
 
 static CMAcceleration tl_gravity(id self, SEL _cmd) {
-    if (!g_haveData) return orig_gravity ? orig_gravity(self, _cmd) : (CMAcceleration){0, 0, -1};
+    BOOL stale = (g_lastRxTime <= 0) || (CACurrentMediaTime() - g_lastRxTime > 0.5);
+    if (!g_haveData || stale) return orig_gravity ? orig_gravity(self, _cmd) : (CMAcceleration){0, 0, -1};
     double gx = -sin(g_iPitch);
     double gy =  sin(g_iRoll) * cos(g_iPitch);
     double gz =  cos(g_iRoll) * cos(g_iPitch);
