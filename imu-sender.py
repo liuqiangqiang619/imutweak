@@ -86,19 +86,23 @@ def usbmux_connect(device_port, udid=None):
 
 
 def connect_sink(args):
-    """持续尝试，直到连上手机端监听端口"""
+    """先试 usbmux(USB)，失败再走 Wi-Fi；一直重试直到连上"""
     while True:
-        try:
-            if args.usbmux:
-                s = usbmux_connect(args.port, args.udid)
-            else:
-                s = socket.create_connection((args.host, args.port), timeout=5)
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            print(f"[imu] connected {'usb' if args.usbmux else args.host}", flush=True)
-            return s
-        except Exception as e:
-            print(f"[imu] wait for phone: {e}", flush=True)
-            time.sleep(2)
+        last = None
+        for mode in (("usb", "wifi") if args.usbmux else ("wifi", "usb")):
+            try:
+                if mode == "usb":
+                    s = usbmux_connect(args.port, args.udid)
+                else:
+                    s = socket.create_connection((args.host, args.port), timeout=5)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                where = "usb" if mode == "usb" else f"wifi {args.host}"
+                print(f"[imu] connected {where}", flush=True)
+                return s
+            except Exception as e:
+                last = e
+        print(f"[imu] wait for phone: {last}", flush=True)
+        time.sleep(2)
 
 
 def gen_sine(t):
