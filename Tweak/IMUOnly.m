@@ -57,6 +57,61 @@ static BOOL g_haveData = NO;
 static double g_yaw = 0, g_pitch = 0, g_roll = 0;   // 由角速度积分出的姿态
 static double g_biasX = 0, g_biasY = 0, g_biasZ = 0;
 
+
+// ------------------------------------------------------------------ 日志：NSLog + 文件 + 可选 TCP 回传
+static FILE* g_logf = NULL;
+static int   g_logSock = -1;
+
+static void TLLogWrite(const char* line) {
+    if (g_logf) { fprintf(g_logf, "%s\n", line); fflush(g_logf); }
+    if (g_logSock >= 0) {
+        char buf[1024];
+        int n = snprintf(buf, sizeof(buf), "%s\n", line);
+        if (n > 0) {
+            if (send(g_logSock, buf, (size_t)n, 0) <= 0) {
+                close(g_logSock);
+                g_logSock = -1;
+            }
+        }
+    }
+}
+
+static void TLLogInit(void) {
+    NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"tl_imu.log"];
+    g_logf = fopen(path.UTF8String, "a");
+    const char* hp = getenv("TL_LOG_HOST");      // 形如 192.168.10.2:9804
+    if (hp && *hp) {
+        char host[128] = {0};
+        int port = 9804;
+        const char* colon = strchr(hp, ':');
+        if (colon) {
+            size_t n = (size_t)(colon - hp); if (n > 127) n = 127;
+            memcpy(host, hp, n);
+            port = atoi(colon + 1);
+        } else {
+            strncpy(host, hp, sizeof(host) - 1);
+        }
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons((uint16_t)port);
+        if (s >= 0 && inet_pton(AF_INET, host, &sa.sin_addr) == 1 &&
+            connect(s, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+            int on = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+            g_logSock = s;
+        } else if (s >= 0) {
+            close(s);
+        }
+    }
+}
+
+#define TL_LOG(fmt, ...) do { \
+    NSString* _m = [NSString stringWithFormat:(fmt), ##__VA_ARGS__]; \
+    TL_LOG(@"%@", _m); \
+    TLLogWrite(_m.UTF8String); \
+} while (0)
+
 // ------------------------------------------------------------------ 工具
 static BOOL SetNum(id obj, NSArray<NSString*>* keys, double v) {
     for (NSString* k in keys) {
@@ -130,7 +185,7 @@ static BOOL SampleAt(double t, float* out) {
 // ------------------------------------------------------------------ 接收线程
 static void* ImuRxThread(void* arg) {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) { NSLog(@"[TLIMU] socket failed"); return NULL; }
+    if (ls < 0) { TL_LOG(@"socket failed"); return NULL; }
     int on = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
@@ -140,24 +195,24 @@ static void* ImuRxThread(void* arg) {
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons(TLIMU_PORT);
     if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        NSLog(@"[TLIMU] bind %d failed", TLIMU_PORT);
+        TL_LOG(@"bind %d failed", TLIMU_PORT);
         close(ls);
         return NULL;
     }
     listen(ls, 2);
-    NSLog(@"[TLIMU] listening %d", TLIMU_PORT);
+    TL_LOG(@"listening %d", TLIMU_PORT);
 
     for (;;) {
         int cs = accept(ls, NULL, NULL);
         if (cs < 0) { usleep(200000); continue; }
         setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
-        NSLog(@"[TLIMU] sender connected");
+        TL_LOG(@"sender connected");
         uint8_t hdr[12];
         while (ReadFull(cs, hdr, sizeof(hdr))) {
             uint8_t type = hdr[0];
             uint16_t len = BE16(hdr + 2);
             if (type != 6 || len == 0 || len > TLIMU_MAX_BATCH * 12) {
-                NSLog(@"[TLIMU] bad frame type=%u len=%u", type, len);
+                TL_LOG(@"bad frame type=%u len=%u", type, len);
                 break;
             }
             uint8_t payload[TLIMU_MAX_BATCH * 12];
@@ -174,9 +229,9 @@ static void* ImuRxThread(void* arg) {
             g_lastRxTime = now;
             g_rxSamples += n;
             g_batches++;
-            if (!g_haveData) { g_haveData = YES; NSLog(@"[TLIMU] first batch n=%d", n); }
+            if (!g_haveData) { g_haveData = YES; TL_LOG(@"first batch n=%d", n); }
         }
-        NSLog(@"[TLIMU] sender disconnected (samples=%llu)", g_rxSamples);
+        TL_LOG(@"sender disconnected (samples=%llu)", g_rxSamples);
         close(cs);
     }
     return NULL;
@@ -193,7 +248,7 @@ static void DumpIvars(void) {
     unsigned int cnt = 0;
     Ivar* ivars = class_copyIvarList(NSClassFromString(@"CMDeviceMotion"), &cnt);
     for (unsigned int i = 0; i < cnt; ++i) {
-        NSLog(@"[TLIMU] ivar %s : %s", ivar_getName(ivars[i]), ivar_getTypeEncoding(ivars[i]));
+        TL_LOG(@"ivar %s : %s", ivar_getName(ivars[i]), ivar_getTypeEncoding(ivars[i]));
     }
     if (ivars) free(ivars);
 }
@@ -263,14 +318,14 @@ static CMDeviceMotion* MakeMotion(double dt) {
             SetNum(m, @[@"_gravityZ", @"gravity.z"], gravZ * 9.81);
             SetNum(m, @[@"_timestamp", @"timestamp"], now);
         } @catch (NSException* e) {
-            NSLog(@"[TLIMU] kvc failed: %@", e.reason);
+            TL_LOG(@"kvc failed: %@", e.reason);
         }
     }
 
-    if (!g_ivarOk && ok) { g_ivarOk = YES; NSLog(@"[TLIMU] ivar write ok"); }
+    if (!g_ivarOk && ok) { g_ivarOk = YES; TL_LOG(@"ivar write ok"); }
     if (!ok && !g_dumped) {
         g_dumped = YES;
-        NSLog(@"[TLIMU] ivar write failed, dumping CMDeviceMotion ivars");
+        TL_LOG(@"ivar write failed, dumping CMDeviceMotion ivars");
         DumpIvars();
     }
     return m;
@@ -290,7 +345,7 @@ static void Tick(void) {
     if ((n % 500) == 0) {
         float g[3] = {0, 0, 0};
         SampleAt(now - g_delayComp, g);
-        NSLog(@"[TLIMU] wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms", g[0], g[1], g[2],
+        TL_LOG(@"wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms", g[0], g[1], g[2],
               g_rxSamples, g_lastRxTime > 0 ? (now - g_lastRxTime) * 1000.0 : -1);
     }
     n++;
@@ -306,7 +361,7 @@ static void StartTickerIfNeeded(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         g_timer = [NSTimer scheduledTimerWithTimeInterval:0.01 repeats:YES block:^(NSTimer* t){ Tick(); }];
         [[NSRunLoop mainRunLoop] addTimer:g_timer forMode:NSRunLoopCommonModes];
-        NSLog(@"[TLIMU] ticker started");
+        TL_LOG(@"ticker started");
     });
 }
 
@@ -331,6 +386,7 @@ static void HookInstance(Class c, SEL s, void* impl) {
 
 __attribute__((constructor))
 static void TLIMUInit(void) {
+    TLLogInit();
     const char* d = getenv("TL_IMU_DELAY");
     if (d) { double v = atof(d); if (v >= 0 && v < 0.5) g_delayComp = v; }
 
@@ -349,5 +405,5 @@ static void TLIMUInit(void) {
 
     pthread_t th;
     pthread_create(&th, NULL, ImuRxThread, NULL);
-    NSLog(@"[TLIMU] init done, delayComp=%.0fms", g_delayComp * 1000.0);
+    TL_LOG(@"init done, delayComp=%.0fms", g_delayComp * 1000.0);
 }
