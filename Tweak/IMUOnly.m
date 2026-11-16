@@ -182,6 +182,37 @@ static void* ImuRxThread(void* arg) {
     return NULL;
 }
 
+
+// ------------------------------------------------------------------ 字段写入
+// CMDeviceMotion 的 rotationRate / userAcceleration / gravity 是 C 结构体，KVC 未必能写；
+// 优先直接按 ivar 偏移写内存，失败再退回 KVC。
+static BOOL g_ivarOk = NO;
+static BOOL g_dumped = NO;
+
+static void DumpIvars(void) {
+    unsigned int cnt = 0;
+    Ivar* ivars = class_copyIvarList(NSClassFromString(@"CMDeviceMotion"), &cnt);
+    for (unsigned int i = 0; i < cnt; ++i) {
+        NSLog(@"[TLIMU] ivar %s : %s", ivar_getName(ivars[i]), ivar_getTypeEncoding(ivars[i]));
+    }
+    if (ivars) free(ivars);
+}
+
+static BOOL WriteStruct3(id obj, const char* name, const double v[3]) {
+    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+    if (!iv) return NO;
+    double* p = (double*)((char*)(__bridge void*)obj + ivar_getOffset(iv));
+    p[0] = v[0]; p[1] = v[1]; p[2] = v[2];
+    return YES;
+}
+
+static BOOL WriteDouble(id obj, const char* name, double v) {
+    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+    if (!iv) return NO;
+    *(double*)((char*)(__bridge void*)obj + ivar_getOffset(iv)) = v;
+    return YES;
+}
+
 // ------------------------------------------------------------------ 造 CMDeviceMotion
 static CMDeviceMotion* MakeMotion(double dt) {
     CMDeviceMotion* m = [[CMDeviceMotion alloc] init];
@@ -213,21 +244,34 @@ static CMDeviceMotion* MakeMotion(double dt) {
     double gravY =  sin(g_roll) * cos(g_pitch);
     double gravZ =  cos(g_roll) * cos(g_pitch);
 
-    @try {
-        BOOL ok = YES;
-        ok &= SetNum(m, @[@"_rotationRateX", @"_gyroX", @"rotationRate.x"], gx);
-        ok &= SetNum(m, @[@"_rotationRateY", @"_gyroY", @"rotationRate.y"], gy);
-        ok &= SetNum(m, @[@"_rotationRateZ", @"_gyroZ", @"rotationRate.z"], gz);
-        ok &= SetNum(m, @[@"_userAccelerationX", @"_accelX"], 0.0);
-        ok &= SetNum(m, @[@"_userAccelerationY", @"_accelY"], 0.0);
-        ok &= SetNum(m, @[@"_userAccelerationZ", @"_accelZ"], 0.0);
-        ok &= SetNum(m, @[@"_gravityX", @"gravity.x"], gravX * 9.81);
-        ok &= SetNum(m, @[@"_gravityY", @"gravity.y"], gravY * 9.81);
-        ok &= SetNum(m, @[@"_gravityZ", @"gravity.z"], gravZ * 9.81);
-        ok &= SetNum(m, @[@"_timestamp", @"timestamp"], now);
-        if (!g_kvcOk && ok) { g_kvcOk = YES; NSLog(@"[TLIMU] motion KVC ok"); }
-    } @catch (NSException* e) {
-        NSLog(@"[TLIMU] kvc failed: %@", e.reason);
+    double rr[3] = {gx, gy, gz};
+    double ua[3] = {0.0, 0.0, 0.0};
+    double gv[3] = {gravX * 9.81, gravY * 9.81, gravZ * 9.81};
+
+    BOOL ok = WriteStruct3(m, "_rotationRate", rr);
+    ok &= WriteStruct3(m, "_userAcceleration", ua);
+    ok &= WriteStruct3(m, "_gravity", gv);
+    ok &= WriteDouble(m, "_timestamp", now);
+
+    if (!ok) {
+        @try {
+            SetNum(m, @[@"_rotationRateX", @"rotationRate.x"], gx);
+            SetNum(m, @[@"_rotationRateY", @"rotationRate.y"], gy);
+            SetNum(m, @[@"_rotationRateZ", @"rotationRate.z"], gz);
+            SetNum(m, @[@"_gravityX", @"gravity.x"], gravX * 9.81);
+            SetNum(m, @[@"_gravityY", @"gravity.y"], gravY * 9.81);
+            SetNum(m, @[@"_gravityZ", @"gravity.z"], gravZ * 9.81);
+            SetNum(m, @[@"_timestamp", @"timestamp"], now);
+        } @catch (NSException* e) {
+            NSLog(@"[TLIMU] kvc failed: %@", e.reason);
+        }
+    }
+
+    if (!g_ivarOk && ok) { g_ivarOk = YES; NSLog(@"[TLIMU] ivar write ok"); }
+    if (!ok && !g_dumped) {
+        g_dumped = YES;
+        NSLog(@"[TLIMU] ivar write failed, dumping CMDeviceMotion ivars");
+        DumpIvars();
     }
     return m;
 }
