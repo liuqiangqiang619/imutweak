@@ -69,3 +69,16 @@ python imu-sender.py --usbmux --mode tianle
 - `TL_IMU_DELAY` 环境变量可调延迟补偿（默认 0.06 秒）
 - 如果 `KVC ok` 没打印，说明该 iOS 版本 `CMDeviceMotion` 的私有 ivar 名变了，需要按 `[TLIMU] ivar ...` 日志（可在构造里打开 `DumpIvars`）调整键名
 - 本插件只补 IMU；画面/音频的注入由另一个插件负责，两者互不干扰
+
+## 天乐已内置发送端
+
+`tl_push.exe` 启动即监听 **9803**（`TL_IMU=0` 可关，`TL_IMU_PORT` 可改），每 50ms 发一包 5 个样本，
+样本来自画面运动（`UpdateVideoMotion` 的 mvx/mvy + 扰动旋转），角速度已做低频平滑。
+
+所以正常情况下只要跑：
+
+```bash
+python imu-sender.py --usbmux --mode tianle
+```
+
+实测：`imu listen on 9803` → sender 转发 → 手机端约 **96.7Hz**（100Hz 标称，受调度抖动影响）。

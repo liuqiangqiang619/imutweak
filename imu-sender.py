@@ -137,11 +137,13 @@ def main():
     args = ap.parse_args()
 
     src = None
+    tl_addr = None
     if args.mode == "tianle":
         h, p = args.tianle.split(":")
+        tl_addr = (h, int(p))
         while True:
             try:
-                src = socket.create_connection((h, int(p)), timeout=5)
+                src = socket.create_connection(tl_addr, timeout=5)
                 print(f"[imu] tianle {args.tianle} connected", flush=True)
                 break
             except Exception as e:
@@ -162,7 +164,13 @@ def main():
                 except Exception as e:
                     print(f"[imu] tianle lost: {e}", flush=True)
                     src = None
-                    continue
+                    try:
+                        src = socket.create_connection(tl_addr, timeout=5)
+                        print("[imu] tianle reconnected", flush=True)
+                    except Exception as e2:
+                        print(f"[imu] wait for tianle: {e2}", flush=True)
+                        time.sleep(1)
+                        continue
             else:
                 batch = []
                 now = time.perf_counter()
