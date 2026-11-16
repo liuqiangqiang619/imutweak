@@ -261,18 +261,33 @@ static void DumpIvars(void) {
     if (ivars) free(ivars);
 }
 
-static BOOL WriteStruct3(id obj, const char* name, const double v[3]) {
-    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+// 严格校验：只写「确实存在、类型对得上、且不越过实例大小」的 ivar。
+// 之前无条件按 ddd 写 24 字节，一旦结构体是 fff 或 ivar 布局不同，就会写坏内存导致闪退。
+static BOOL IvAddr(id obj, const char* name, size_t need, const char* encHint, void** out) {
+    if (!obj || !name) return NO;
+    Class cls = object_getClass(obj);
+    Ivar iv = class_getInstanceVariable(cls, name);
     if (!iv) return NO;
-    double* p = (double*)((char*)(__bridge void*)obj + ivar_getOffset(iv));
-    p[0] = v[0]; p[1] = v[1]; p[2] = v[2];
+    const char* t = ivar_getTypeEncoding(iv);
+    ptrdiff_t off = ivar_getOffset(iv);
+    size_t isz = class_getInstanceSize(cls);
+    if (!t || off < 0 || (size_t)off + need > isz) return NO;
+    if (encHint && !strstr(t, encHint)) return NO;
+    *out = (char*)(__bridge void*)obj + off;
+    return YES;
+}
+
+static BOOL WriteStruct3(id obj, const char* name, const double v[3]) {
+    void* p = NULL;
+    if (!IvAddr(obj, name, 24, "ddd", &p)) return NO;
+    memcpy(p, v, 24);
     return YES;
 }
 
 static BOOL WriteDouble(id obj, const char* name, double v) {
-    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
-    if (!iv) return NO;
-    *(double*)((char*)(__bridge void*)obj + ivar_getOffset(iv)) = v;
+    void* p = NULL;
+    if (!IvAddr(obj, name, 8, "d", &p)) return NO;
+    memcpy(p, &v, 8);
     return YES;
 }
 
@@ -312,9 +327,8 @@ static CMDeviceMotion* MakeMotion(double dt) {
     double gv[3] = {gravX * 9.81, gravY * 9.81, gravZ * 9.81};
 
     BOOL ok = WriteStruct3(m, "_rotationRate", rr);
-    ok &= WriteStruct3(m, "_userAcceleration", ua);
-    ok &= WriteStruct3(m, "_gravity", gv);
     ok &= WriteDouble(m, "_timestamp", now);
+    (void)ua; (void)gv;
 
     if (!ok) {
         @try {
@@ -345,10 +359,14 @@ static void Tick(void) {
     double now = CACurrentMediaTime();
     double dt = last > 0 ? (now - last) : 0.01;
     last = now;
-    CMDeviceMotion* m = MakeMotion(dt);
-    if (g_handler) {
-        void (^h)(CMDeviceMotion*, NSError*) = g_handler;
-        h(m, nil);
+    @try {
+        CMDeviceMotion* m = MakeMotion(dt);
+        if (g_handler) {
+            void (^h)(CMDeviceMotion*, NSError*) = g_handler;
+            h(m, nil);
+        }
+    } @catch (NSException* e) {
+        TL_LOG(@"tick exception: %@", e.reason);
     }
     if ((n % 500) == 0) {
         float g[3] = {0, 0, 0};
