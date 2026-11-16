@@ -64,7 +64,7 @@ static double g_lastRxTime = 0;
 static unsigned long long g_rxSamples = 0, g_batches = 0;
 
 static id g_handler = nil;
-static NSTimer* g_timer = nil;
+static NSTimer* g_logTimer = nil;
 static BOOL g_kvcOk = NO;
 static BOOL g_haveData = NO;
 
@@ -292,90 +292,60 @@ static BOOL WriteDouble(id obj, const char* name, double v) {
     return YES;
 }
 
-// ------------------------------------------------------------------ 造 CMDeviceMotion
-static CMDeviceMotion* MakeMotion(double dt) {
-    CMDeviceMotion* m = [[CMDeviceMotion alloc] init];
+// ------------------------------------------------------------------ 用 getter 覆盖（不伪造对象）
+// 教训：iOS 的 CMDeviceMotion 只有一个 ivar `_internal`（CMDeviceMotionInternal），
+// [[CMDeviceMotion alloc] init] 出来的对象 _internal 是 nil，抖音一读 rotationRate/attitude 就崩。
+// 所以让真实对象继续流动，只把 rotationRate / timestamp / gravity 三个 getter 换成我们的实现。
 
-    float g[3] = {0, 0, 0};
-    double now = CACurrentMediaTime();
-    BOOL live = SampleAt(now - g_delayComp, g);
+static CMRotationRate (*orig_rotationRate)(id, SEL) = NULL;
+static NSTimeInterval (*orig_timestamp)(id, SEL) = NULL;
+static CMAcceleration (*orig_gravity)(id, SEL) = NULL;
 
-    // 没收到数据：全 0（手机静止），加一点传感器噪声
-    if (!live) { g[0] = g[1] = g[2] = 0; }
+static double g_iYaw = 0, g_iPitch = 0, g_iRoll = 0, g_iLast = 0;
 
-    double nz = 0.0035;
-    double gx = g[0] + g_biasX + ((double)arc4random() / UINT32_MAX - 0.5) * nz;
-    double gy = g[1] + g_biasY + ((double)arc4random() / UINT32_MAX - 0.5) * nz;
-    double gz = g[2] + g_biasZ + ((double)arc4random() / UINT32_MAX - 0.5) * nz;
-    g_biasX += ((double)arc4random() / UINT32_MAX - 0.5) * 2e-5;
-    g_biasY += ((double)arc4random() / UINT32_MAX - 0.5) * 2e-5;
-    g_biasZ += ((double)arc4random() / UINT32_MAX - 0.5) * 2e-5;
-    // 慢漂移不无限跑
-    if (fabs(g_biasX) > 0.01) g_biasX *= 0.999;
-    if (fabs(g_biasY) > 0.01) g_biasY *= 0.999;
-    if (fabs(g_biasZ) > 0.01) g_biasZ *= 0.999;
-
-    g_yaw   += gy * dt;
-    g_pitch += gx * dt;
-    g_roll  += gz * dt;
-
-    double gravX = -sin(g_pitch);
-    double gravY =  sin(g_roll) * cos(g_pitch);
-    double gravZ =  cos(g_roll) * cos(g_pitch);
-
-    double rr[3] = {gx, gy, gz};
-    double ua[3] = {0.0, 0.0, 0.0};
-    double gv[3] = {gravX * 9.81, gravY * 9.81, gravZ * 9.81};
-
-    BOOL ok = WriteStruct3(m, "_rotationRate", rr);
-    ok &= WriteDouble(m, "_timestamp", now);
-    (void)ua; (void)gv;
-
-    if (!ok) {
-        @try {
-            SetNum(m, @[@"_rotationRateX", @"rotationRate.x"], gx);
-            SetNum(m, @[@"_rotationRateY", @"rotationRate.y"], gy);
-            SetNum(m, @[@"_rotationRateZ", @"rotationRate.z"], gz);
-            SetNum(m, @[@"_gravityX", @"gravity.x"], gravX * 9.81);
-            SetNum(m, @[@"_gravityY", @"gravity.y"], gravY * 9.81);
-            SetNum(m, @[@"_gravityZ", @"gravity.z"], gravZ * 9.81);
-            SetNum(m, @[@"_timestamp", @"timestamp"], now);
-        } @catch (NSException* e) {
-            TL_LOG(@"kvc failed: %@", e.reason);
-        }
-    }
-
-    if (!g_ivarOk && ok) { g_ivarOk = YES; TL_LOG(@"ivar write ok"); }
-    if (!ok && !g_dumped) {
-        g_dumped = YES;
-        TL_LOG(@"ivar write failed, dumping CMDeviceMotion ivars");
-        DumpIvars();
-    }
-    return m;
+static void TLIntegrate(double t, const float g[3]) {
+    double dt = g_iLast > 0 ? (t - g_iLast) : 0.01;
+    if (dt <= 0 || dt > 0.2) dt = 0.01;
+    g_iLast = t;
+    g_iYaw   += g[1] * dt;
+    g_iPitch += g[0] * dt;
+    g_iRoll  += g[2] * dt;
 }
 
-static void Tick(void) {
-    static double last = 0;
-    static unsigned long long n = 0;
+static CMRotationRate tl_rotationRate(id self, SEL _cmd) {
+    if (!g_haveData) return orig_rotationRate ? orig_rotationRate(self, _cmd) : (CMRotationRate){0, 0, 0};
+    double t = CACurrentMediaTime();
+    float g[3] = {0, 0, 0};
+    SampleAt(t - g_delayComp, g);
+    TLIntegrate(t, g);
+    const double nz = 0.0035;
+    double nx = ((double)arc4random() / UINT32_MAX - 0.5) * nz;
+    double ny = ((double)arc4random() / UINT32_MAX - 0.5) * nz;
+    double nzz = ((double)arc4random() / UINT32_MAX - 0.5) * nz;
+    return (CMRotationRate){ g[0] + nx, g[1] + ny, g[2] + nzz };
+}
+
+static NSTimeInterval tl_timestamp(id self, SEL _cmd) {
+    // 与 CMSampleBuffer 的 PTS 同一根表（mach_absolute_time）
+    return CACurrentMediaTime();
+}
+
+static CMAcceleration tl_gravity(id self, SEL _cmd) {
+    if (!g_haveData) return orig_gravity ? orig_gravity(self, _cmd) : (CMAcceleration){0, 0, -1};
+    double gx = -sin(g_iPitch);
+    double gy =  sin(g_iRoll) * cos(g_iPitch);
+    double gz =  cos(g_iRoll) * cos(g_iPitch);
+    return (CMAcceleration){ gx, gy, gz };
+}
+
+// 只用来周期性打点，不参与数据通路
+static void TickLog(void) {
+    if (!g_haveData) return;
     double now = CACurrentMediaTime();
-    double dt = last > 0 ? (now - last) : 0.01;
-    last = now;
-    @try {
-        CMDeviceMotion* m = MakeMotion(dt);
-        if (g_handler) {
-            void (^h)(CMDeviceMotion*, NSError*) = g_handler;
-            h(m, nil);
-        }
-    } @catch (NSException* e) {
-        TL_LOG(@"tick exception: %@", e.reason);
-    }
-    if ((n % 500) == 0) {
-        float g[3] = {0, 0, 0};
-        SampleAt(now - g_delayComp, g);
-        TL_LOG(@"wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms", g[0], g[1], g[2],
-              g_rxSamples, g_lastRxTime > 0 ? (now - g_lastRxTime) * 1000.0 : -1);
-    }
-    n++;
+    float g[3] = {0, 0, 0};
+    SampleAt(now - g_delayComp, g);
+    TL_LOG(@"wx=%.3f wy=%.3f wz=%.3f rx=%llu age=%.0fms", g[0], g[1], g[2],
+           g_rxSamples, g_lastRxTime > 0 ? (now - g_lastRxTime) * 1000.0 : -1);
 }
 
 // ------------------------------------------------------------------ hook
@@ -383,27 +353,28 @@ static void (*orig_start_q)(id, SEL, NSOperationQueue*, id) = NULL;
 static void (*orig_start_rf)(id, SEL, NSInteger, NSOperationQueue*, id) = NULL;
 static void (*orig_start_plain)(id, SEL) = NULL;
 
-static void StartTickerIfNeeded(void) {
-    if (g_timer) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        g_timer = [NSTimer scheduledTimerWithTimeInterval:0.01 repeats:YES block:^(NSTimer* t){ Tick(); }];
-        [[NSRunLoop mainRunLoop] addTimer:g_timer forMode:NSRunLoopCommonModes];
-        TL_LOG(@"ticker started");
+static void (^g_userHandler)(CMDeviceMotion*, NSError*) = nil;
+
+static void my_start_q(id self, SEL _cmd, NSOperationQueue* q, id handler) {
+    g_userHandler = [handler copy];
+    if (!orig_start_q) return;
+    orig_start_q(self, _cmd, q, ^(CMDeviceMotion* m, NSError* e) {
+        void (^h)(CMDeviceMotion*, NSError*) = g_userHandler;
+        if (h) h(m, e);
     });
 }
 
-static void my_start_q(id self, SEL _cmd, NSOperationQueue* q, id handler) {
-    g_handler = [handler copy];
-    StartTickerIfNeeded();
-}
-
 static void my_start_rf(id self, SEL _cmd, NSInteger frame, NSOperationQueue* q, id handler) {
-    g_handler = [handler copy];
-    StartTickerIfNeeded();
+    g_userHandler = [handler copy];
+    if (!orig_start_rf) return;
+    orig_start_rf(self, _cmd, frame, q, ^(CMDeviceMotion* m, NSError* e) {
+        void (^h)(CMDeviceMotion*, NSError*) = g_userHandler;
+        if (h) h(m, e);
+    });
 }
 
 static void my_start_plain(id self, SEL _cmd) {
-    StartTickerIfNeeded();
+    if (orig_start_plain) orig_start_plain(self, _cmd);
 }
 
 static void HookInstance(Class c, SEL s, void* impl) {
@@ -422,6 +393,19 @@ static void TLInstallHooks(void) {
         Method mp = class_getInstanceMethod(c, @selector(startDeviceMotionUpdates));
         if (mp) { orig_start_plain = (void*)method_getImplementation(mp); method_setImplementation(mp, (IMP)my_start_plain); }
         // 不再伪造 isDeviceMotionAvailable / isGyroAvailable（真机本来就有，少改一处少一分风险）
+
+        Class dm = NSClassFromString(@"CMDeviceMotion");
+        if (dm) {
+            Method mr = class_getInstanceMethod(dm, @selector(rotationRate));
+            if (mr) { orig_rotationRate = (void*)method_getImplementation(mr); method_setImplementation(mr, (IMP)tl_rotationRate); }
+            Method mt = class_getInstanceMethod(dm, @selector(timestamp));
+            if (mt) { orig_timestamp = (void*)method_getImplementation(mt); method_setImplementation(mt, (IMP)tl_timestamp); }
+            Method mg = class_getInstanceMethod(dm, @selector(gravity));
+            if (mg) { orig_gravity = (void*)method_getImplementation(mg); method_setImplementation(mg, (IMP)tl_gravity); }
+            TL_LOG(@"motion getters hooked (rate=%d ts=%d grav=%d)", orig_rotationRate != NULL, orig_timestamp != NULL, orig_gravity != NULL);
+        }
+
+        g_logTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer* t){ TickLog(); }];
         TL_LOG(@"hooks installed");
     } @catch (NSException* e) {
         TL_LOG(@"hook install failed: %@", e.reason);
