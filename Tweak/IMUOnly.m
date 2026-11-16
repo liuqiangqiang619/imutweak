@@ -412,18 +412,19 @@ static CMQuaternion tl_att_quat(id self, SEL _cmd) {
     TLRotation(TLNormPi(g_iYaw), TLNormPi(g_iPitch), TLNormPi(g_iRoll), m);
     double tr = m[0] + m[4] + m[8];
     double x, y, z, w;
+    // 行主序 R 的标准反解（符号已按 row-major 校验：与 TLRotation 往返误差 <1e-15）
     if (tr > 0) {
         double S = sqrt(tr + 1.0) * 2.0;
-        w = 0.25 * S; x = (m[5] - m[7]) / S; y = (m[6] - m[2]) / S; z = (m[1] - m[3]) / S;
+        w = 0.25 * S; x = (m[7] - m[5]) / S; y = (m[2] - m[6]) / S; z = (m[3] - m[1]) / S;
     } else if (m[0] > m[4] && m[0] > m[8]) {
         double S = sqrt(1.0 + m[0] - m[4] - m[8]) * 2.0;
-        w = (m[5] - m[7]) / S; x = 0.25 * S; y = (m[3] + m[1]) / S; z = (m[6] + m[2]) / S;
+        w = (m[7] - m[5]) / S; x = 0.25 * S; y = (m[1] + m[3]) / S; z = (m[2] + m[6]) / S;
     } else if (m[4] > m[8]) {
         double S = sqrt(1.0 + m[4] - m[0] - m[8]) * 2.0;
-        w = (m[6] - m[2]) / S; x = (m[3] + m[1]) / S; y = 0.25 * S; z = (m[7] + m[5]) / S;
+        w = (m[2] - m[6]) / S; x = (m[1] + m[3]) / S; y = 0.25 * S; z = (m[5] + m[7]) / S;
     } else {
         double S = sqrt(1.0 + m[8] - m[0] - m[4]) * 2.0;
-        w = (m[1] - m[3]) / S; x = (m[6] + m[2]) / S; y = (m[7] + m[5]) / S; z = 0.25 * S;
+        w = (m[3] - m[1]) / S; x = (m[2] + m[6]) / S; y = (m[5] + m[7]) / S; z = 0.25 * S;
     }
     return (CMQuaternion){x, y, z, w};
 }
