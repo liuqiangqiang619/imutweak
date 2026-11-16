@@ -31,6 +31,7 @@
 #import <string.h>
 #import <stdio.h>
 #import <unistd.h>
+#import <dispatch/dispatch.h>
 #import <stdlib.h>
 
 static void TLLogWrite(const char* line);
@@ -410,26 +411,41 @@ static void HookInstance(Class c, SEL s, void* impl) {
     if (m) method_setImplementation(m, (IMP)impl);
 }
 
+static void TLInstallHooks(void) {
+    @try {
+        Class c = NSClassFromString(@"CMMotionManager");
+        if (!c) { TL_LOG(@"CMMotionManager not found"); return; }
+        Method mq = class_getInstanceMethod(c, @selector(startDeviceMotionUpdatesToQueue:withHandler:));
+        if (mq) { orig_start_q = (void*)method_getImplementation(mq); method_setImplementation(mq, (IMP)my_start_q); }
+        Method mr = class_getInstanceMethod(c, @selector(startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:));
+        if (mr) { orig_start_rf = (void*)method_getImplementation(mr); method_setImplementation(mr, (IMP)my_start_rf); }
+        Method mp = class_getInstanceMethod(c, @selector(startDeviceMotionUpdates));
+        if (mp) { orig_start_plain = (void*)method_getImplementation(mp); method_setImplementation(mp, (IMP)my_start_plain); }
+        // 不再伪造 isDeviceMotionAvailable / isGyroAvailable（真机本来就有，少改一处少一分风险）
+        TL_LOG(@"hooks installed");
+    } @catch (NSException* e) {
+        TL_LOG(@"hook install failed: %@", e.reason);
+    }
+}
+
 __attribute__((constructor))
 static void TLIMUInit(void) {
     TLLogInit();
     const char* d = getenv("TL_IMU_DELAY");
     if (d) { double v = atof(d); if (v >= 0 && v < 0.5) g_delayComp = v; }
 
-    Class c = NSClassFromString(@"CMMotionManager");
-    if (c) {
-        orig_start_q = (void*)method_getImplementation(class_getInstanceMethod(c, @selector(startDeviceMotionUpdatesToQueue:withHandler:)));
-        HookInstance(c, @selector(startDeviceMotionUpdatesToQueue:withHandler:), (void*)my_start_q);
-        HookInstance(c, @selector(startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:), (void*)my_start_rf);
-        HookInstance(c, @selector(startDeviceMotionUpdates), (void*)my_start_plain);
-
-        Method av = class_getInstanceMethod(c, @selector(isDeviceMotionAvailable));
-        if (av) method_setImplementation(av, imp_implementationWithBlock(^BOOL(id _s){ return YES; }));
-        Method gv = class_getInstanceMethod(c, @selector(isGyroAvailable));
-        if (gv) method_setImplementation(gv, imp_implementationWithBlock(^BOOL(id _s){ return YES; }));
-    }
-
     pthread_t th;
     pthread_create(&th, NULL, ImuRxThread, NULL);
-    TL_LOG(@"init done, delayComp=%.0fms", g_delayComp * 1000.0);
+
+    if (getenv("TL_IMU_EARLY")) {
+        TLInstallHooks();
+        TL_LOG(@"init done (early), delayComp=%.0fms", g_delayComp * 1000.0);
+    } else {
+        // 与 Cam.dylib 这类插件共存：等它把相机/音频 hook 装完再挂，避开启动期的初始化竞争
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            TLInstallHooks();
+            TL_LOG(@"init done (deferred 1.5s), delayComp=%.0fms", g_delayComp * 1000.0);
+        });
+    }
 }
